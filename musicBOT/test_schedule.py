@@ -20,6 +20,42 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
     def at(self, hour, minute, day=16):
         return datetime(2026, 10, day, hour, minute, tzinfo=JST)
 
+    async def test_chime_pauses_restores_and_runs_once(self):
+        self.bot.current = Track(1, "user", "song", "url")
+        self.bot.ipc_path = "pipe"
+        self.bot.phase = "再生中"
+        self.bot.send_ipc = AsyncMock()
+        self.bot.run_process = AsyncMock()
+        await self.bot.chime_tick(self.at(21, 0))
+        await self.bot.chime_tick(self.at(21, 0))
+        self.assertEqual(self.bot.send_ipc.await_args_list[0].args[0], ["set_property", "pause", True])
+        self.assertEqual(self.bot.send_ipc.await_args_list[1].args[0], ["set_property", "pause", False])
+        self.bot.run_process.assert_awaited_once()
+        self.assertIn("--volume=35", self.bot.run_process.call_args.args[0])
+        self.assertEqual(self.bot.volume, 20)
+
+    async def test_chime_test_date_and_failure_restore(self):
+        self.bot.run_process = AsyncMock(side_effect=RuntimeError("failed"))
+        self.bot.send_ipc = AsyncMock()
+        self.bot.current = Track(1, "user", "song", "url")
+        self.bot.ipc_path = "pipe"
+        self.bot.phase = "再生中"
+        await self.bot.chime_tick(self.at(19, 15, 17))
+        self.bot.run_process.assert_not_awaited()
+        with self.assertRaises(RuntimeError):
+            await self.bot.chime_tick(self.at(19, 15))
+        self.assertTrue(self.bot.chime_idle.is_set())
+        self.assertFalse(self.bot.chime_active)
+        self.assertEqual(self.bot.send_ipc.await_args_list[-1].args[0], ["set_property", "pause", False])
+
+    async def test_chime_preserves_existing_pause(self):
+        self.bot.phase = "一時停止中"
+        self.bot.ipc_path = "pipe"
+        self.bot.send_ipc = AsyncMock()
+        self.bot.run_process = AsyncMock()
+        await self.bot.chime_tick(self.at(21, 0))
+        self.bot.send_ipc.assert_not_awaited()
+
     async def test_prepare_interrupt_once_and_repeat_next_day(self):
         async def pending(track):
             await asyncio.Event().wait()
