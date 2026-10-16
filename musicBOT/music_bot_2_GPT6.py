@@ -7,6 +7,7 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import getpass
 import json
 import os
@@ -27,6 +28,12 @@ QUEUE_CHANNEL_ID = 1559531557348450395
 QUEUE_STATE = Path(__file__).with_name("queue_message.json")
 PREFETCH_COUNT = 3
 AUDIO_FILTER = "--af=lavfi=[loudnorm=I=-16:TP=-1.5:LRA=11]"
+JST = timezone(timedelta(hours=9))
+SCHEDULE_URL = "https://www.youtube.com/watch?v=OgYWssWn7uQ"
+
+
+def japan_now():
+    return datetime.now(JST)
 
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 NICO_ID = re.compile(r"^(?:(?:sm|nm|so)\d+|\d+)$")
@@ -182,6 +189,13 @@ class MusicBot(discord.Client):
         self.dashboard_payload = None
         self.dashboard_worker = None
         self.last_errors = {}
+        self.schedule_worker = None
+        self.schedule_track = None
+        self.schedule_date = None
+        self.schedule_started = False
+        self.schedule_pending = False
+        self.schedule_active = False
+        self.night_finished = False
         self.register_commands()
         self.tree.on_error = self.on_command_error
 
@@ -197,8 +211,12 @@ class MusicBot(discord.Client):
         await self.tree.sync(guild=guild)
         self.worker = asyncio.create_task(self.playback_loop())
         self.dashboard_worker = asyncio.create_task(self.dashboard_loop())
+        self.schedule_worker = asyncio.create_task(self.schedule_loop())
 
     async def close(self):
+        if self.schedule_worker:
+            self.schedule_worker.cancel()
+            await asyncio.gather(self.schedule_worker, return_exceptions=True)
         if self.dashboard_worker:
             self.dashboard_worker.cancel()
             await asyncio.gather(self.dashboard_worker, return_exceptions=True)
@@ -440,6 +458,9 @@ class MusicBot(discord.Client):
 
     async def add_url(self, author, raw_url, force_playlist, reply=None):
         reply = reply or self.say
+        if self.night_blocked():
+            await reply("夜間停止中です。曲の受付・再生は日本時間8:00からです。")
+            return
         url, is_playlist = normalize_url(raw_url, force_playlist)
         generation = self.queue_generation
         async with self.add_lock:
@@ -454,6 +475,9 @@ class MusicBot(discord.Client):
                 await reply("キューがリセットされたため、この追加を取り消しました。")
                 return
             entries = data.get("entries", []) if is_playlist else [data]
+            if self.night_blocked():
+                await reply("夜間停止に入ったため、曲の追加を取り消しました。")
+                return
             room = 100 - len(self.queue.queues.get(author.id, []))
             tracks = []
             for entry in entries:
@@ -526,6 +550,9 @@ class MusicBot(discord.Client):
     async def handle_command(self, author, text, reply):
         command = text.split(maxsplit=1)[0].lower() if text else ""
         try:
+            if command == "/resume" and self.night_blocked():
+                await reply("夜間停止中です。日本時間8:00まで再生できません。")
+                return
             if command == "/ping":
                 await reply("接続OK！")
             elif command == "/help":
@@ -571,7 +598,7 @@ class MusicBot(discord.Client):
                 if not self.current:
                     await reply("現在再生していません。")
                     return
-                if not self.controller(author):
+                if not self.controller(author) and not (self.schedule_active and command in ("/volumeup", "/volumedown")):
                     await reply("この操作は、現在の曲を追加した本人かサーバー管理者が使えます。")
                     return
                 if command == "/skip":
@@ -634,6 +661,8 @@ class MusicBot(discord.Client):
     def refresh_prefetch(self):
         # 同じURLの別予約も個別に管理し、ユーザー交互の予測順に追従する。
         tracks = ([self.current] if self.current else []) + self.queue.preview(PREFETCH_COUNT)
+        if self.schedule_track and all(t is not self.schedule_track for t in tracks):
+            tracks.append(self.schedule_track)
         wanted = {id(track) for track in tracks}
         for key in list(self.downloads):
             if key not in wanted:
@@ -647,11 +676,77 @@ class MusicBot(discord.Client):
                 # 先読み失敗は再生順が来たときに通知する。
                 task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
+    def night_blocked(self, now=None):
+        now = now or japan_now()
+        minutes = now.hour * 60 + now.minute
+        return minutes < 480 or minutes >= 1435
+
+    async def schedule_tick(self, now):
+        # A late start after 23:55 stays silent; never replay a missed announcement.
+        minutes = now.hour * 60 + now.minute
+        if self.schedule_date != now.date() and not self.schedule_active and not self.schedule_pending:
+            self.schedule_started = False
+        if 480 <= minutes < 1430 and self.night_finished:
+            self.night_finished = False
+            self.stopped = False
+            self.wake.set()
+        if 1430 <= minutes < 1435 and self.schedule_date != now.date():
+            self.schedule_date = now.date()
+            self.schedule_started = False
+            self.schedule_track = Track(0, "毎日の時刻指定", "23:55の指定音源", SCHEDULE_URL)
+            self.refresh_prefetch()
+        if minutes == 1435 and not self.schedule_started:
+            self.schedule_started = True
+            self.schedule_date = now.date()
+            if self.schedule_track is None:
+                self.schedule_track = Track(0, "毎日の時刻指定", "23:55の指定音源", SCHEDULE_URL)
+                self.refresh_prefetch()
+            self.schedule_pending = True
+            self.stopped = True
+            self.volume = 40
+            await self.skip_current()
+            self.wake.set()
+        elif minutes > 1435 and self.schedule_track and not self.schedule_started:
+            task = self.downloads.pop(id(self.schedule_track), None)
+            self.schedule_track = None
+            if task:
+                self.discard_download(task)
+        if self.night_blocked(now) and not self.schedule_active and not self.schedule_pending:
+            self.stopped = True
+            self.night_finished = True
+            if self.current:
+                await self.skip_current()
+
+    async def schedule_loop(self):
+        await self.wait_until_ready()
+        while True:
+            try:
+                await self.schedule_tick(japan_now())
+            except Exception as error:
+                await self.report_error("時刻指定処理失敗", error, repeat=True)
+            await asyncio.sleep(1)
+
+    def finish_scheduled_playback(self):
+        self.schedule_active = False
+        self.schedule_track = None
+        self.stopped = True
+        self.night_finished = True
+        self.queue_generation += 1
+        self.queue.clear()
+        self.refresh_prefetch()
+
     async def playback_loop(self):
         await self.wait_until_ready()
         while True:
             self.wake.clear()
-            track = None if self.stopped else self.queue.next()
+            scheduled = self.schedule_pending
+            if scheduled:
+                track = self.schedule_track
+                self.schedule_pending = False
+                self.schedule_active = True
+                self.volume = 40
+            else:
+                track = None if self.stopped or self.night_blocked() else self.queue.next()
             if track is None:
                 await self.wake.wait()
                 continue
@@ -694,6 +789,8 @@ class MusicBot(discord.Client):
                 if download:
                     self.discard_download(download)
                 self.current, self.skip_event, self.ipc_path = None, None, None
+                if scheduled:
+                    self.finish_scheduled_playback()
                 self.phase = "待機中"
                 await self.update_dashboard()
 
