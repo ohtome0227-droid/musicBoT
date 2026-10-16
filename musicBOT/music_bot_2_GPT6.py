@@ -30,6 +30,8 @@ PREFETCH_COUNT = 3
 AUDIO_FILTER = "--af=lavfi=[loudnorm=I=-16:TP=-1.5:LRA=11]"
 JST = timezone(timedelta(hours=9))
 SCHEDULE_URL = "https://www.youtube.com/watch?v=OgYWssWn7uQ"
+VOLUME_STEPS = {"/volumeup": 2, "/volumedown": -2,
+                "/volumeup5": 5, "/volumedown5": -5}
 
 
 def japan_now():
@@ -358,7 +360,9 @@ class MusicBot(discord.Client):
             "reset": "全員の待ち曲をリセット（サーバー管理者のみ・再生中の曲は継続）",
             "play": "YouTube・ニコニコ動画のURLから曲を追加", "playlist": "再生リスト・マイリスト・シリーズを追加"}
         descriptions.update({"volumeup": "音量を2ポイント上げる（最大100%）",
-                             "volumedown": "音量を2ポイント下げる（最小0%）"})
+                             "volumedown": "音量を2ポイント下げる（最小0%）",
+                             "volumeup5": "音量を5ポイント上げる（最大100%）",
+                             "volumedown5": "音量を5ポイント下げる（最小0%）"})
         def callback_for(name):
             if name in ("play", "playlist"):
                 async def with_url(interaction: discord.Interaction, url: str):
@@ -560,6 +564,7 @@ class MusicBot(discord.Client):
                                "/skip: 次へ\n/pause: 一時停止\n/resume: 再開\n/clear: 自分の待ち曲を削除\n"
                                "/reset: 全員の待ち曲をリセット（管理者のみ・再生中の曲は継続）\n"
                                "/volumeup: 音量を2ポイント上げる\n/volumedown: 音量を2ポイント下げる\n"
+                               "/volumeup5: 音量を5ポイント上げる\n/volumedown5: 音量を5ポイント下げる\n"
                                "音量は0～100%（初期値50%）。変更は次の曲にも引き継ぎます。\n"
                                "/stop: 停止（管理者のみ・予約は残す）\nスキップ/一時停止/再開/音量調整: 曲の本人か管理者。")
             elif command == "/queue":
@@ -586,7 +591,7 @@ class MusicBot(discord.Client):
                 self.stopped = True
                 await self.skip_current()
                 await reply("停止しました。待ち曲は残ります。/resumeで次の曲から再開します。")
-            elif command in ("/skip", "/pause", "/resume", "/volumeup", "/volumedown"):
+            elif command in ("/skip", "/pause", "/resume") or command in VOLUME_STEPS:
                 if command == "/resume" and self.stopped:
                     if not author.guild_permissions.manage_guild:
                         await reply("停止からの再開はサーバー管理権限のある人が操作してください。")
@@ -598,15 +603,15 @@ class MusicBot(discord.Client):
                 if not self.current:
                     await reply("現在再生していません。")
                     return
-                if not self.controller(author) and not (self.schedule_active and command in ("/volumeup", "/volumedown")):
+                if not self.controller(author) and not (self.schedule_active and command in VOLUME_STEPS):
                     await reply("この操作は、現在の曲を追加した本人かサーバー管理者が使えます。")
                     return
                 if command == "/skip":
                     await self.skip_current()
                     await reply("この曲をスキップします。")
-                elif command in ("/volumeup", "/volumedown"):
+                elif command in VOLUME_STEPS:
                     async with self.volume_lock:
-                        volume = max(0, min(100, self.volume + (2 if command == "/volumeup" else -2)))
+                        volume = max(0, min(100, self.volume + VOLUME_STEPS[command]))
                         await self.send_ipc(["set_property", "volume", volume])
                         self.volume = volume
                     await reply(f"音量を{volume}%に設定しました。")
