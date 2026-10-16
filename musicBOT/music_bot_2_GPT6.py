@@ -339,8 +339,8 @@ class MusicBot(discord.Client):
             "resume": "再生を再開", "clear": "自分の待ち曲を削除", "stop": "予約を残して停止",
             "reset": "全員の待ち曲をリセット（サーバー管理者のみ・再生中の曲は継続）",
             "play": "YouTube・ニコニコ動画のURLから曲を追加", "playlist": "再生リスト・マイリスト・シリーズを追加"}
-        descriptions.update({"volumeup": "音量を5ポイント上げる（最大100%）",
-                             "volumedown": "音量を5ポイント下げる（最小0%）"})
+        descriptions.update({"volumeup": "音量を2ポイント上げる（最大100%）",
+                             "volumedown": "音量を2ポイント下げる（最小0%）"})
         def callback_for(name):
             if name in ("play", "playlist"):
                 async def with_url(interaction: discord.Interaction, url: str):
@@ -532,7 +532,7 @@ class MusicBot(discord.Client):
                 await reply("/play URL: 1曲追加\n/playlist URL: リスト追加\n/queue: 順番\n/now: 現在の曲\n"
                                "/skip: 次へ\n/pause: 一時停止\n/resume: 再開\n/clear: 自分の待ち曲を削除\n"
                                "/reset: 全員の待ち曲をリセット（管理者のみ・再生中の曲は継続）\n"
-                               "/volumeup: 音量を5ポイント上げる\n/volumedown: 音量を5ポイント下げる\n"
+                               "/volumeup: 音量を2ポイント上げる\n/volumedown: 音量を2ポイント下げる\n"
                                "音量は0～100%（初期値50%）。変更は次の曲にも引き継ぎます。\n"
                                "/stop: 停止（管理者のみ・予約は残す）\nスキップ/一時停止/再開/音量調整: 曲の本人か管理者。")
             elif command == "/queue":
@@ -579,7 +579,7 @@ class MusicBot(discord.Client):
                     await reply("この曲をスキップします。")
                 elif command in ("/volumeup", "/volumedown"):
                     async with self.volume_lock:
-                        volume = max(0, min(100, self.volume + (5 if command == "/volumeup" else -5)))
+                        volume = max(0, min(100, self.volume + (2 if command == "/volumeup" else -2)))
                         await self.send_ipc(["set_property", "volume", volume])
                         self.volume = volume
                     await reply(f"音量を{volume}%に設定しました。")
@@ -781,4 +781,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from single_instance import run_single_instance
+    run_single_instance(main)

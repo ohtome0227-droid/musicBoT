@@ -110,4 +110,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from single_instance import run_single_instance
+    run_single_instance(main)
